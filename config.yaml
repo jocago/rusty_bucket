@@ -1,0 +1,14 @@
+operations:
+  - name: Backup test_orig
+    origin: /Users/jocago/Downloads/test_orig
+    destination: /Users/jocago/Downloads/copy_test_fast
+    operation_type: Copy
+    rate_limit:
+      enabled: false # No rate limiting
+  - name: Move test_orig_2
+    origin: /Users/jocago/Downloads/test_orig
+    destination: /Users/jocago/Downloads/copy_test_slow
+    operation_type: Copy
+    rate_limit:
+      enabled: true
+      bytes_per_second: 524288 # 512 KB/s
