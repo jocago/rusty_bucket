@@ -1,5 +1,6 @@
 mod config;
 mod file_ops;
+mod rate_limiter;
 mod ui;
 mod validation;
 
@@ -265,19 +266,23 @@ fn create_default_config() -> config::Config {
                 origin: current_dir.join("example_source.txt"),
                 destination: current_dir.join("example_destination.txt"),
                 operation_type: config::OperationType::Copy,
+                rate_limit: config::RateLimit::default(),
             },
             config::FileOperation {
                 name: "Example Move".to_string(),
                 origin: current_dir.join("example_to_move.txt"),
                 destination: current_dir.join("archive/example_moved.txt"),
                 operation_type: config::OperationType::Move,
+                rate_limit: config::RateLimit::default(),
             },
             config::FileOperation {
                 name: "Backup Documents".to_string(),
                 origin: current_dir.join("documents"),
                 destination: current_dir.join("backup/documents"),
                 operation_type: config::OperationType::Copy,
+                rate_limit: config::RateLimit::default(),
             },
         ],
+        global_rate_limit: config::RateLimit::default(),
     }
 }

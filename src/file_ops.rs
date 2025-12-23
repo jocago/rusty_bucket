@@ -227,7 +227,7 @@ impl FileManager {
         details.push("  Starting file copy...".to_string());
 
         // Use a custom copy function with rate limiting
-        let copy_result = if rate_limiter.is_enabled() {
+        let copy_result: io::Result<u64> = if rate_limiter.is_enabled() {
             Self::copy_file_with_rate_limit(
                 &operation.origin,
                 &operation.destination,
