@@ -143,7 +143,7 @@ impl App {
             println!("Progress: {}", msg);
         });
 
-        let results = FileManager::execute_operations(&self.config.operations, Some(callback));
+        let results = FileManager::execute_operations(&self.config.operations, &self.config.global_rate_limit, Some(callback));
 
         self.results = results;
         self.show_results = true;

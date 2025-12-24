@@ -1,4 +1,4 @@
-use crate::config::{FileOperation, OperationType};
+use crate::config::{FileOperation, OperationType, RateLimit};
 use crate::rate_limiter::RateLimiter;
 use crate::validation;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -42,6 +42,7 @@ pub struct FileManager;
 impl FileManager {
     pub fn execute_operations(
         operations: &[FileOperation],
+        global_rate_limit: &RateLimit,
         progress_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
     ) -> Vec<OperationResult> {
         let results = Arc::new(Mutex::new(Vec::new()));
@@ -64,7 +65,7 @@ impl FileManager {
 
         operations.par_iter().for_each(|op| {
             let start_time = SystemTime::now();
-            let result = Self::execute_single_operation(op, start_time);
+            let result = Self::execute_single_operation(op, global_rate_limit, start_time);
 
             let mut results_lock = results.lock().unwrap();
             results_lock.push(result);
@@ -87,6 +88,7 @@ impl FileManager {
 
     fn execute_single_operation(
         operation: &FileOperation,
+        global_rate_limit: &RateLimit,
         start_time: SystemTime,
     ) -> OperationResult {
         let mut details = Vec::new();
@@ -165,9 +167,9 @@ impl FileManager {
         match operation.operation_type {
             OperationType::Copy => {
                 if is_dir {
-                    result = Self::copy_directory(operation, details);
+                    result = Self::copy_directory(operation, global_rate_limit, details);
                 } else {
-                    result = Self::copy_file(operation, details);
+                    result = Self::copy_file(operation, global_rate_limit, details);
                 }
             }
             OperationType::Move => {
@@ -183,7 +185,36 @@ impl FileManager {
         result
     }
 
-    fn copy_file(operation: &FileOperation, mut details: Vec<String>) -> OperationResult {
+    fn compute_effective_bps(op: &RateLimit, global: &RateLimit) -> Option<u64> {
+        // Respect enabled flags and choose defaults/caps
+        // If neither enabled, no throttling
+        if !op.enabled && !global.enabled {
+            return None;
+        }
+        // Helper to convert RateLimit to optional bps
+        let to_bps = |rl: &RateLimit| -> Option<u64> {
+            if !rl.enabled {
+                return None;
+            }
+            if let Some(bps) = rl.bytes_per_second {
+                Some(bps)
+            } else if let Some(mb_min) = rl.megabytes_per_minute {
+                Some(mb_min * 1024 * 1024 / 60)
+            } else {
+                None
+            }
+        };
+        let op_bps = to_bps(op);
+        let global_bps = to_bps(global);
+        match (op_bps, global_bps) {
+            (Some(o), Some(g)) => Some(o.min(g)),
+            (Some(o), None) => Some(o),
+            (None, Some(g)) => Some(g),
+            (None, None) => None,
+        }
+    }
+
+    fn copy_file(operation: &FileOperation, global_rate_limit: &RateLimit, mut details: Vec<String>) -> OperationResult {
         let mut result = OperationResult {
             operation_name: operation.name.clone(),
             source: operation.origin.to_string_lossy().to_string(),
@@ -208,11 +239,9 @@ impl FileManager {
         result.total_size = file_size;
         details.push(format!("  File size: {} bytes", result.total_size));
 
-        // Create rate limiter for this operation
-        let mut rate_limiter = RateLimiter::new(
-            operation.rate_limit.bytes_per_second,
-            operation.rate_limit.megabytes_per_minute,
-        );
+        // Compute effective rate limit combining per-op and global (cap by min)
+        let effective_bps = Self::compute_effective_bps(&operation.rate_limit, global_rate_limit);
+        let mut rate_limiter = RateLimiter::new(effective_bps, None);
 
         if rate_limiter.is_enabled() {
             if let Some(limit) = rate_limiter.get_rate_limit() {
@@ -341,6 +370,11 @@ impl FileManager {
         let total_size = metadata.len();
         let mut total_copied = 0;
 
+        // Emit initial progress at 0%
+        if total_size > 0 {
+            println!("  Progress: 0% (0.00 KB/s)");
+        }
+
         // Use a buffer for chunked copying
         let buffer_size = 64 * 1024; // 64KB chunks
         let mut buffer = vec![0u8; buffer_size];
@@ -358,22 +392,27 @@ impl FileManager {
             rate_limiter.throttle_chunk(bytes_read, total_size);
 
             // Report progress every 10% or for files under 10MB
-            if total_size > 0
-                && (total_copied * 10 / total_size
-                    > (total_copied - bytes_read as u64) * 10 / total_size
-                    || total_size < 10 * 1024 * 1024)
-            {
-                let percent = (total_copied as f64 / total_size as f64 * 100.0) as u32;
-                let rate = rate_limiter.get_current_rate();
-                println!("  Progress: {}% ({:.2} KB/s)", percent, rate / 1024.0);
+            if total_size > 0 {
+                let before = (total_copied.saturating_sub(bytes_read as u64)) * 100 / total_size;
+                let after = (total_copied * 100 / total_size).min(99); // avoid 100% inside loop
+                if after > before || total_size < 10 * 1024 * 1024 {
+                    let rate = rate_limiter.get_current_rate();
+                    println!("  Progress: {}% ({:.2} KB/s)", after, rate / 1024.0);
+                }
             }
+        }
+
+        // Finalize at 100%
+        if total_size > 0 {
+            let rate = rate_limiter.get_current_rate();
+            println!("  Progress: 100% ({:.2} KB/s)", rate / 1024.0);
         }
 
         dest_file.sync_all()?;
         Ok(total_copied)
     }
 
-    fn copy_directory(operation: &FileOperation, mut details: Vec<String>) -> OperationResult {
+    fn copy_directory(operation: &FileOperation, global_rate_limit: &RateLimit, mut details: Vec<String>) -> OperationResult {
         let mut result = OperationResult {
             operation_name: operation.name.clone(),
             source: operation.origin.to_string_lossy().to_string(),
@@ -394,6 +433,19 @@ impl FileManager {
         let mut error_messages = Vec::new();
 
         details.push("  Starting directory copy...".to_string());
+
+        // Prepare a shared rate limiter for the whole directory copy
+        let effective_bps = Self::compute_effective_bps(&operation.rate_limit, global_rate_limit);
+        let mut dir_rate_limiter = RateLimiter::new(effective_bps, None);
+        if dir_rate_limiter.is_enabled() {
+            if let Some(limit) = dir_rate_limiter.get_rate_limit() {
+                details.push(format!(
+                    "  Directory rate limiting: {} bytes/second ({:.2} MB/min)",
+                    limit,
+                    limit as f64 * 60.0 / (1024.0 * 1024.0)
+                ));
+            }
+        }
 
         if let Err(e) = fs::create_dir_all(&operation.destination) {
             let error_msg = format!("Failed to create destination directory: {}", e);
@@ -455,7 +507,13 @@ impl FileManager {
                     source_path.display()
                 ));
 
-                match fs::copy(source_path, &dest_path) {
+                let copy_res: io::Result<u64> = if dir_rate_limiter.is_enabled() {
+                    Self::copy_file_with_rate_limit(source_path, &dest_path, &mut dir_rate_limiter)
+                } else {
+                    fs::copy(source_path, &dest_path)
+                };
+
+                match copy_res {
                     Ok(bytes_copied) => {
                         details.push(format!("    Copied {} bytes", bytes_copied));
 

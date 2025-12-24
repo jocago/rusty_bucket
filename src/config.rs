@@ -24,6 +24,7 @@ pub struct FileOperation {
     pub origin: PathBuf,
     pub destination: PathBuf,
     pub operation_type: OperationType,
+    #[serde(default)]
     pub rate_limit: RateLimit, // NEW: Rate limiting per operation
 }
 
@@ -36,6 +37,7 @@ pub enum OperationType {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub operations: Vec<FileOperation>,
+    #[serde(default)]
     pub global_rate_limit: RateLimit, // NEW: Global rate limit
 }
 

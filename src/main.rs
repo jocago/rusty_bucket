@@ -50,21 +50,26 @@ fn main() -> anyhow::Result<()> {
     let verbose = matches.get_flag("verbose");
     let report_dir = matches.get_one::<String>("report-dir").unwrap();
 
-    let config = match config::Config::load_from_file(config_path) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            if verbose {
-                println!("Failed to load config from '{}': {}", config_path, e);
+    let config = if std::path::Path::new(config_path).exists() {
+        match config::Config::load_from_file(config_path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                if verbose {
+                    println!("Failed to parse config '{}': {}", config_path, e);
+                }
+                println!("Using in-memory default configuration (existing file was left untouched). Please fix your YAML or press 's' in the UI to save the current config.");
+                create_default_config()
             }
-            println!("Config file not found or invalid. Creating default config...");
-            let default_config = create_default_config();
-            if let Err(e) = default_config.save_to_file(config_path) {
-                println!("Warning: Could not save default config: {}", e);
-            } else {
-                println!("Default config created at '{}'", config_path);
-            }
-            default_config
         }
+    } else {
+        println!("Config file not found. Creating a default config at '{}'...", config_path);
+        let default_config = create_default_config();
+        if let Err(e) = default_config.save_to_file(config_path) {
+            println!("Warning: Could not save default config: {}", e);
+        } else {
+            println!("Default config created at '{}'", config_path);
+        }
+        default_config
     };
 
     if verbose {
@@ -157,7 +162,7 @@ fn run_batch_mode(config: &config::Config, verbose: bool, report_dir: &str) -> a
         println!();
     }
 
-    let results = file_ops::FileManager::execute_operations(&config.operations, None);
+    let results = file_ops::FileManager::execute_operations(&config.operations, &config.global_rate_limit, None);
 
     let summary_report = file_ops::FileManager::generate_report(&results);
     println!("{}", summary_report);
